@@ -26,9 +26,15 @@ decomposition = seasonal_decompose(df['Milk in pounds per cow'], period=12)
 #4 model generation and print
 # ARIMA - Auto Regressive Integrated Moving Average
 amodel = ARIMA(df['Milk in pounds per cow'], order = (10, 1, 5))
-#try 5, 1, 0
+# try 5, 1, 0
 afit = amodel.fit()
 aforecast = afit.forecast(steps=12)
+
+#5 model generation and print again
+# SARIMA - Seasonal Aouto Regressive Integrated Moving Average
+smodel = SARIMAX(df['Milk in pounds per cow'], order = (1, 1, 1), seasonal_order=(1, 1, 1, 12))
+sfit = smodel.fit()
+sforecast = sfit.get_forecast(steps = 12).predicted_mean 
 
 with PdfPages("les7_plots.pdf") as pdf:
 #1
@@ -52,7 +58,14 @@ with PdfPages("les7_plots.pdf") as pdf:
 
 #4
      df['Milk in pounds per cow'].plot(label = 'Data')
-     aforecast.plot(label = 'ARIMA Prediction', color = 'red')
+     aforecast.plot(label = 'ARIMA Prediction', color = 'black')
      plt.legend()
      pdf.savefig()
      plt.close()
+
+#5
+     df['Milk in pounds per cow'].plot(label = 'Data')
+     sforecast.plot(label = 'SARIMA Prediction', color = "red")
+     plt.legend()
+     pdf.savefig()
+     plt.close() 
