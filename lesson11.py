@@ -29,7 +29,7 @@ if args.amount is not None:
             usd_amount = args.amount / 31.8
         elif args.start == "wan":
             usd_amount = args.amount / 1490
-        
+
     if args.end == "rmb":
         print (usd_amount * 6.8)
     elif args.end == "yen":
