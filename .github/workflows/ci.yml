@@ -21,4 +21,4 @@ jobs:
           pip install pytest
       - name: Run tests with pytest
         run: |
-          pytest OneDrive/tests/test.py
+          pytest ../tests/test.py
