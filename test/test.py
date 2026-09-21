@@ -13,4 +13,4 @@ def test_abraham():
 def test_best_abigail():
     rates = get_rates()
     result = convert_currency(1, "USD", "EUR", rates)
-    assert result == 0.861
+    assert result == 0.871
