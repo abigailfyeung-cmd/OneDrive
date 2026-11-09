@@ -1,5 +1,6 @@
 import argparse
 import csv
+import contextlib
 import html
 import io
 import math
@@ -14,6 +15,29 @@ from typing import Iterable, TextIO
 LABELS = ("negative", "positive")
 TOKEN_PATTERN = re.compile(r"[a-z0-9]+(?:'[a-z0-9]+)?")
 TAG_PATTERN = re.compile(r"<[^>]+>")
+DEFAULT_OUTPUT_PATH = Path(__file__).resolve().with_name("movie_output.txt")
+
+
+class _Tee:
+    def __init__(self, console: TextIO, output_file: TextIO) -> None:
+        self.console = console
+        self.output_file = output_file
+
+    @property
+    def encoding(self) -> str | None:
+        return self.console.encoding
+
+    def write(self, text: str) -> int:
+        self.console.write(text)
+        self.output_file.write(text)
+        return len(text)
+
+    def flush(self) -> None:
+        self.console.flush()
+        self.output_file.flush()
+
+    def isatty(self) -> bool:
+        return self.console.isatty()
 
 
 class SentimentClassifier:
@@ -118,6 +142,41 @@ def load_reviews(dataset_path: Path) -> Iterable[tuple[str, str]]:
             yield from _read_reviews(stream)
 
 
+def display_reviews(
+    labeled_reviews: Iterable[tuple[str, str]], classifier: SentimentClassifier
+) -> tuple[int, float | None]:
+    count = 0
+    outcomes: Counter[tuple[str, str]] = Counter()
+    for count, (review, original_sentiment) in enumerate(labeled_reviews, start=1):
+        predicted_sentiment = classifier.predict(review)
+        outcomes[original_sentiment, predicted_sentiment] += 1
+        readable_review = " ".join(
+            html.unescape(TAG_PATTERN.sub(" ", review)).split()
+        )
+        print(
+            f"{count}. Original: {original_sentiment.title()} | "
+            f"Predicted: {predicted_sentiment.title()} | Review: {readable_review}"
+        )
+
+    positive_positive = outcomes["positive", "positive"]
+    positive_negative = outcomes["positive", "negative"]
+    negative_positive = outcomes["negative", "positive"]
+    negative_negative = outcomes["negative", "negative"]
+    denominator = math.sqrt(
+        (positive_positive + positive_negative)
+        * (negative_positive + negative_negative)
+        * (positive_positive + negative_positive)
+        * (positive_negative + negative_negative)
+    )
+    pearson_score = (
+        (positive_positive * negative_negative - positive_negative * negative_positive)
+        / denominator
+        if denominator
+        else None
+    )
+    return count, pearson_score
+
+
 def default_dataset_path() -> Path | None:
     candidates = (
         Path(__file__).resolve().parent / "IMDB Dataset.csv.zip",
@@ -126,21 +185,46 @@ def default_dataset_path() -> Path | None:
     return next((path for path in candidates if path.is_file()), None)
 
 
-def main(argv: list[str] | None = None) -> int:
+def _build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         description="Predict whether movie reviews express positive or negative sentiment."
     )
     parser.add_argument(
         "reviews",
         nargs="*",
-        help="one or more reviews to classify; omit to enter reviews interactively",
+        help="one or more reviews to classify",
     )
     parser.add_argument(
         "--dataset",
         type=Path,
         help="CSV or ZIP dataset path (defaults to IMDB Dataset.csv.zip in Downloads)",
     )
+    parser.add_argument(
+        "--show-all",
+        action="store_true",
+        help="print every dataset review alongside its positive/negative label (the default)",
+    )
+    parser.add_argument(
+        "--interactive",
+        action="store_true",
+        help="enter reviews interactively instead of listing the dataset",
+    )
+    parser.add_argument(
+        "--output",
+        type=Path,
+        default=DEFAULT_OUTPUT_PATH,
+        help=f"file for a copy of command output (default: {DEFAULT_OUTPUT_PATH})",
+    )
+    return parser
+
+
+def _run(parser: argparse.ArgumentParser, argv: list[str] | None) -> int:
     args = parser.parse_args(argv)
+
+    if args.interactive and (args.show_all or args.reviews):
+        parser.error("--interactive cannot be used with --show-all or review text")
+    if args.show_all and args.reviews:
+        parser.error("--show-all cannot be used with review text arguments")
 
     dataset_path = args.dataset or default_dataset_path()
     if dataset_path is None:
@@ -157,15 +241,31 @@ def main(argv: list[str] | None = None) -> int:
         parser.error(f"could not train from {dataset_path}: {error}")
 
     print(f"Trained on {sum(classifier.document_counts.values()):,} reviews.")
-    if args.reviews:
-        reviews = args.reviews
+    if args.show_all or (not args.reviews and not args.interactive):
         try:
-            for review in reviews:
+            count, pearson_score = display_reviews(
+                load_reviews(dataset_path), classifier
+            )
+        except (OSError, ValueError, csv.Error, zipfile.BadZipFile) as error:
+            parser.error(f"could not read reviews from {dataset_path}: {error}")
+        print(f"Displayed {count:,} reviews.")
+        if pearson_score is None:
+            print("Pearson correlation (original vs. predicted): undefined")
+        else:
+            print(
+                "Pearson correlation (original vs. predicted): "
+                f"{pearson_score:.6f}"
+            )
+        return 0
+
+    if args.reviews:
+        try:
+            for review in args.reviews:
                 label = classifier.predict(review)
                 print(f"{label.title()} feedback")
         except ValueError as error:
             parser.error(f"could not classify review: {error}")
-    else:
+    elif args.interactive:
         try:
             while True:
                 review = input("Enter a review (blank to quit): ").strip()
@@ -177,6 +277,42 @@ def main(argv: list[str] | None = None) -> int:
             pass
 
     return 0
+
+
+def main(argv: list[str] | None = None) -> int:
+    if hasattr(sys.stdout, "reconfigure"):
+        sys.stdout.reconfigure(encoding="utf-8")
+    if hasattr(sys.stderr, "reconfigure"):
+        sys.stderr.reconfigure(encoding="utf-8")
+
+    output_parser = argparse.ArgumentParser(add_help=False)
+    output_parser.add_argument("--output", type=Path, default=DEFAULT_OUTPUT_PATH)
+    output_parser.add_argument("--dataset", type=Path)
+    output_args, _ = output_parser.parse_known_args(argv)
+
+    output_path = output_args.output
+    dataset_path = output_args.dataset or default_dataset_path()
+    protected_paths = [Path(__file__).resolve()]
+    if dataset_path is not None:
+        protected_paths.append(dataset_path.resolve())
+    if output_path.resolve() in protected_paths:
+        print(
+            f"Command output file cannot overwrite the script or dataset: {output_path}",
+            file=sys.stderr,
+        )
+        return 2
+
+    try:
+        with output_path.open("w", encoding="utf-8", newline="") as output_file:
+            stdout = _Tee(sys.stdout, output_file)
+            stderr = _Tee(sys.stderr, output_file)
+            with contextlib.redirect_stdout(stdout), contextlib.redirect_stderr(stderr):
+                result = _run(_build_parser(), argv)
+                print(f"Command output saved to {output_path}")
+                return result
+    except OSError as error:
+        print(f"Could not write command output to {output_path}: {error}", file=sys.stderr)
+        return 2
 
 
 if __name__ == "__main__":
