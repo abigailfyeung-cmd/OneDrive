@@ -177,12 +177,48 @@ def display_reviews(
     return count, pearson_score
 
 
+def evaluate_reviews(
+    labeled_reviews: Iterable[tuple[str, str]], classifier: SentimentClassifier
+) -> tuple[int, float | None]:
+    count = 0
+    outcomes: Counter[tuple[str, str]] = Counter()
+    for count, (review, original_sentiment) in enumerate(labeled_reviews, start=1):
+        predicted_sentiment = classifier.predict(review)
+        outcomes[original_sentiment, predicted_sentiment] += 1
+
+    positive_positive = outcomes["positive", "positive"]
+    positive_negative = outcomes["positive", "negative"]
+    negative_positive = outcomes["negative", "positive"]
+    negative_negative = outcomes["negative", "negative"]
+    denominator = math.sqrt(
+        (positive_positive + positive_negative)
+        * (negative_positive + negative_negative)
+        * (positive_positive + negative_positive)
+        * (positive_negative + negative_negative)
+    )
+    pearson_score = (
+        (positive_positive * negative_negative - positive_negative * negative_positive)
+        / denominator
+        if denominator
+        else None
+    )
+    return count, pearson_score
+
+
 def default_dataset_path() -> Path | None:
     candidates = (
         Path(__file__).resolve().parent / "IMDB Dataset.csv.zip",
         Path.home() / "Downloads" / "IMDB Dataset.csv.zip",
     )
     return next((path for path in candidates if path.is_file()), None)
+
+
+def split_training_reviews(
+    labeled_reviews: Iterable[tuple[str, str]],
+) -> tuple[list[tuple[str, str]], list[tuple[str, str]]]:
+    reviews = list(labeled_reviews)
+    training_count = int(len(reviews) * 0.90)
+    return reviews[:training_count], reviews
 
 
 def _build_parser() -> argparse.ArgumentParser:
@@ -202,7 +238,7 @@ def _build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--show-all",
         action="store_true",
-        help="print every dataset review alongside its positive/negative label (the default)",
+        help="print every dataset review alongside its positive/negative label",
     )
     parser.add_argument(
         "--interactive",
@@ -234,21 +270,43 @@ def _run(parser: argparse.ArgumentParser, argv: list[str] | None) -> int:
     if not dataset_path.is_file():
         parser.error(f"dataset file does not exist: {dataset_path}")
 
+    try:
+        training_reviews, evaluation_reviews = split_training_reviews(
+            load_reviews(dataset_path)
+        )
+    except (OSError, ValueError, csv.Error, zipfile.BadZipFile) as error:
+        parser.error(f"could not read reviews from {dataset_path}: {error}")
+
     classifier = SentimentClassifier()
     try:
-        classifier.fit(load_reviews(dataset_path))
+        classifier.fit(training_reviews)
     except (OSError, ValueError, csv.Error, zipfile.BadZipFile) as error:
         parser.error(f"could not train from {dataset_path}: {error}")
 
-    print(f"Trained on {sum(classifier.document_counts.values()):,} reviews.")
-    if args.show_all or (not args.reviews and not args.interactive):
+    print(
+        f"Trained on {sum(classifier.document_counts.values()):,} reviews "
+        "(90% of dataset)."
+    )
+    if args.show_all:
         try:
             count, pearson_score = display_reviews(
-                load_reviews(dataset_path), classifier
+                evaluation_reviews, classifier
             )
         except (OSError, ValueError, csv.Error, zipfile.BadZipFile) as error:
             parser.error(f"could not read reviews from {dataset_path}: {error}")
-        print(f"Displayed {count:,} reviews.")
+        print(f"Displayed and evaluated {count:,} reviews.")
+    elif not args.reviews and not args.interactive:
+        try:
+            count, pearson_score = evaluate_reviews(
+                evaluation_reviews, classifier
+            )
+        except (OSError, ValueError, csv.Error, zipfile.BadZipFile) as error:
+            parser.error(f"could not read reviews from {dataset_path}: {error}")
+        print(f"Evaluated {count:,} reviews.")
+    else:
+        pearson_score = None
+
+    if not args.reviews and not args.interactive:
         if pearson_score is None:
             print("Pearson correlation (original vs. predicted): undefined")
         else:
